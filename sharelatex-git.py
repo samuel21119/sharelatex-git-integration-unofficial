@@ -23,6 +23,8 @@
 ## You should have received a copy of the GNU General Public License
 ## along with sharelatex-git-integration-unofficial.  If not, see <http://www.gnu.org/licenses/>.
 ##
+SHARELATEX_URL="https://elsa-latex.cs.nthu.edu.tw"
+
 from optparse import OptionParser
 try:
     from bs4 import BeautifulSoup
@@ -39,6 +41,19 @@ import sys
 import re
 import getpass
 import configparser
+import base64
+import json
+
+def dictToBase64(d):
+    s = json.dumps(d)
+    re = base64.b64encode(s.encode('utf-8'))
+    return re.decode("utf-8")
+
+def base64ToDict(b):
+    b = bytes(b, "utf-8")
+    s = base64.b64decode(b).decode('utf-8')
+    return json.loads(s)
+
 
 #------------------------------------------------------------------------------
 # Logger class, used to log messages. A special method can be used to
@@ -204,7 +219,7 @@ def files_changed():
 #
 # Return the project title (null if it can't be determined).
 #------------------------------------------------------------------------------
-def fetch_updates(url, email, password):
+def fetch_updates(url, email, password, cookie):
     file_name = 'sharelatex.zip'
 
     base_url = extract_base_url(url)
@@ -213,16 +228,25 @@ def fetch_updates(url, email, password):
     
     Logger().log("Downloading files from {}...".format(download_url))
 
+    re_cookie = None
     try:
         session = requests.Session()
         
         if email is not None:
-            if password is None:
-                password = getpass.getpass("Enter password: ")
-            Logger().log("Logging in {} with user {}...".format(login_url, email))
-            r = session.get(login_url)
-            csrf = BeautifulSoup(r.text, 'html.parser').find('input', { 'name' : '_csrf' })['value']
-            session.post(login_url, { '_csrf' : csrf , 'email' : email , 'password' : password })
+            if cookie is None or cookie == '':
+                if password is None:
+                    password = getpass.getpass("Enter password: ")
+                Logger().log("Logging in {} with user {}...".format(login_url, email))
+                r = session.get(login_url)
+                csrf = BeautifulSoup(r.text, 'html.parser').find('input', { 'name' : '_csrf' })['value']
+                r = session.post(login_url, { '_csrf' : csrf , 'email' : email , 'password' : password })
+                # print(f"cookies: {r.cookies}")
+                # cookie_dict = requests.utils.dict_from_cookiejar(r.cookies)
+                # print(f"cookies: {cookie_dict}")
+            else:
+                session.cookies = requests.utils.cookiejar_from_dict(cookie, cookiejar=None, overwrite=True)
+
+        re_cookie = requests.utils.dict_from_cookiejar(session.cookies)
 
         r = session.get(download_url, stream=True)
         with open(file_name, 'wb') as f:
@@ -249,9 +273,9 @@ def fetch_updates(url, email, password):
 
     try:
         r = session.get(url)
-        return BeautifulSoup(r.text, 'html.parser').find('title').text.rsplit('-',1)[0].strip()
+        return BeautifulSoup(r.text, 'html.parser').find('title').text.rsplit('-',1)[0].strip(), re_cookie
     except:
-        return None
+        return None, None
     
 #------------------------------------------------------------------------------
 # Handles old-style .sharelatex-git files, which only contain single ids of 
@@ -263,7 +287,7 @@ def read_old_style_saved_config_value(key):
         try:
             Logger().log("Reading project id from an old-style .sharelatex-git file", True, 'YELLOW')
             with open(doc, 'r') as f:
-                return 'https://www.sharelatex.com/project/{}'.format(f.readline().strip())
+                return f'{SHARELATEX_URL}' + '/project/{}'.format(f.readline().strip())
         except:
             pass
     return None
@@ -352,13 +376,19 @@ def git_push():
 def go(url, email, password, message, push, dont_commit):
     url = determine_config_value('url', url)
     email = determine_config_value('email', email)
+    cookie = determine_config_value('cookie', '')
+    if cookie is not '' and cookie is not None:
+        try:
+            cookie = base64ToDict(cookie)
+        except:
+            cookie = ''
 
     if url is None:
         Logger().fatal_error('No url supplied! See (-h) for usage.')
     
     ensure_git_repository_started()
     ensure_gitignore_is_fine()
-    project_title=fetch_updates(url, email, password)
+    project_title, cookie = fetch_updates(url, email, password, cookie)
 
     if not dont_commit:
         if files_changed():
@@ -375,6 +405,7 @@ def go(url, email, password, message, push, dont_commit):
 
     write_saved_config_value('url', url)
     write_saved_config_value('email', email)
+    write_saved_config_value('cookie', dictToBase64(cookie))
     Logger().log('All done!')
 
 #------------------------------------------------------------------------------
@@ -392,7 +423,7 @@ def normalize_input(i):
     else:
         p = re.compile("[a-zA-Z0-9]*")
         if p.match(i):
-            return 'https://www.sharelatex.com/project/{}'.format(i)
+            return f'{SHARELATEX_URL}' + '/project/{}'.format(i)
         else:
             Logger().log('Unrecognized id supplied ({})'.format(i))
 
@@ -411,7 +442,7 @@ def extract_base_url(url):
 #------------------------------------------------------------------------------
 def parse_input():
     parser = OptionParser("usage: %prog [options] [url|id].\n"
-    "e.g.\n\t%prog -m 'Wrote Thesis introduction' https://www.sharelatex.com/project/56147712cc7f5d0adeadbeef\n"
+    f"e.g.\n\t%prog -m 'Wrote Thesis introduction' {SHARELATEX_URL}/project/56147712cc7f5d0adeadbeef\n"
     "\t%prog -m 'Wrote Thesis introduction' 56147712cc7f5d0adeadbeef\n"
     "\t%prog -m 'Wrote Thesis introduction'                                                            [id from last invocation is used]\n"
     "\t%prog                                                                                           [id from last invocation is used, nothing is added to commit message]")
